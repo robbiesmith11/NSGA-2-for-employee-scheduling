@@ -5,6 +5,8 @@ from numba import jit
 import cProfile
 from ortools.sat.python import cp_model
 import matplotlib.pyplot as plt
+import copy
+
 """
 constraints: using ORtools
 -maxium shifts per employee a day <= 1
@@ -19,11 +21,15 @@ Optimise: using NSGA-2
 
 steps left: 
 
--improvements exponetial fitness
--numba
+important : 
+
+-mutation rework (shift length + day swap)
+
+not as important : 
+ 
 -learning rate
--(optional) - meta models to search for approx fitness values to speed up, visualisation
--coperative selection?
+-(optional) - meta models to search for approx fitness values to speed up, 
+
 """
 
 def main():
@@ -37,8 +43,8 @@ def main():
 
     #adjustable parameters
     workers = 1000
-    population_size = 300
-    generation_size = 50
+    population_size = 100
+    generation_size = 100
     mutation_rate = 0.03
     tournement_size = 3
     elite_size = 3
@@ -56,7 +62,7 @@ def main():
     ("fitness", np.float64, (2)), #representing amount of objectives for the fitness
     ("front", np.int32),  # ranking of indiviudal
     ("crowding_distance", np.float64), #2nd use of ranking to decide on better inidivdual within front by variety of individual
-    ("dominates", object), #used object type so that an np array of varying sizes can be added as each individual will have different amounts
+    ("dominates", np.int32, (population_size*2)), #used object type so that an np array of varying sizes can be added as each individual will have different amounts
     ("domination_count", np.int32)  # count of how many it is dominated by 
     ])
 
@@ -69,49 +75,54 @@ def main():
     crowding_distance(initial_population)
     
     final_population = generations(generation_size, initial_population, tournement_size, mutation_rate, elite_size, type_population, df_avail, df_demand, shifts, df_num_workers)
+    visualise_fronts(final_population)
 
 def generations(generation_size, population, tournement_size, mutation_rate, elite_size, type_population, df, df_demand, shifts, df_num_workers):
 
+    """Loop through number of generations performing selection-crossover-mutation on population then calculating new fitness/performance values
+    then combining previous and current population to sort for best half as form of elitism by preserving some of the best while also having diversity
+    due to the crowding distance factor, population is then reset to zeroes before appending the best population_size half schedules to it"""
+   
     for i in range(generation_size):
 
-        children = crossover(population, tournement_size, df, df_demand, type_population) #parents are chosen in crossover
-        mutated = mutation(children, mutation_rate, shifts, df, df_demand)
+        mutated = point_crossover(population, tournement_size, df, df_demand, type_population) #parents are chosen in crossover
+        #mutated = mutation(children, mutation_rate, shifts, df, df_demand)
 
-        #calculate new fitness for the mutated population
+        #calculate new fitness for the mutated population while fitness the other attributes 
         for individual in range(len(mutated)):
             mutated[individual]["fitness"] = calculate_fitness(mutated[individual], df_num_workers)
-            population[individual]["dominates"] = np.array([])
+            mutated[individual]["dominates"][:] = -1
+            population[individual]["dominates"][:] = -1 
+        #resets the other attributes
+        population["domination_count"] = 0
+        population["front"] = 0
+        population["crowding_distance"] = 0.0
 
-        #add population and mutated together then calculate the , front and sorting
-        #new_population = np.concatenate((population, mutated), axis=0)
-        #new_population["domination_count"] = 0
-        #new_population["front"] = 0
-        #new_population["crowding_distance"] = 0.0
-        
-        non_dominated_sorting(mutated)
-        crowding_distance(mutated)
+        #combine the population and calculate new fronts and crowd distance in relation to the combined population
+        combined_population = np.concatenate((population, mutated))
+        non_dominated_sorting(combined_population)
+        crowding_distance(combined_population)
+        #get the fronts 
+        fronts = combined_population["front"]
+        #get the distances 
+        distances = combined_population["crowding_distance"]
+        #sort the population based on the fronts and reverse of the distances as higher = better
+        sorted_population = combined_population[np.lexsort((-distances, fronts))]
 
-        fronts = mutated["front"]
-        distances = mutated["crowding_distance"]
-        sorted_population = mutated[np.lexsort((-distances, fronts))]
-        
-        #sort for best len(population) then population = sorted_new_population
-        new_population = sorted_population[:len(mutated)]
-        top_five = new_population[:5]
-        print("generation", i)
-        print(top_five["fitness"])
-        print(top_five["front"])
-        print(top_five["crowding_distance"])
+        #use the best half of the combined population to form the next generation
+        new_population = sorted_population[:len(population)]
 
+        #reset population and use current schedules for the next population
         population = np.zeros(len(population), dtype=type_population)
-        population["schedule"] = new_population["schedule"]
-        
+        population = np.copy(new_population)
+
+        print("Generation", i+1)
     return population
 
 def break_local_optima(population):
-
-    """if top 5 individuals are identical in fitness scores then increase mutation size and reduce tournement size
-    """
+    pass
+    """if top 5 individuals are identical in fitness scores then increase mutation size and reduce tournement size"""
+    
 
 def mutation(population, mutation_rate, shifts, df, df_demand):
 
@@ -120,67 +131,79 @@ def mutation(population, mutation_rate, shifts, df, df_demand):
     from the inital creation"""
 
     for individual in population:
-        #if a number less than mutation rate is picked then mutate the chromosome
         if random.random() < mutation_rate:
             not_feasible = True
-            #loop through each worker to apply mutation to a day of their schedule
-            for w in range(len(individual["schedule"])):
-                #while loop to make sure solution is feasible 
+            mutated = copy.deepcopy(individual)
+            for w, schedule in enumerate(mutated["schedule"]):
                 while not_feasible:
-                    #copy of individual in the while loop so if the solution is not feasible it resets back to its orignal stopping a loop of infeasible schedules
-                    mutated = individual.copy()
-                    schedule = mutated["schedule"][w]
-                    random_day = random.randrange(len(schedule))
-                    random_shift = random.choice(shifts)
-                    #loop to make sure not applying hours to a day they have off "0"
-                    while schedule[random_day] == 0:
-                        random_day = random.randrange(len(schedule))
-                    #assign shift to that day in schedule
-                    schedule[random_day] = random_shift
-                    #check if solution is feasible still , if it is then change the individuals schedules to to the feasible mutated version
-                    if feasibility_check(mutated, df, df_demand):
-                        #break while loop
+                    days_to_mutate = np.count_nonzero(mutated["schedule"][w]) 
+                    mutate_days = random.sample(range(len(schedule)), days_to_mutate)
+                    for day in mutate_days:
+                        if schedule[day] != 0:  
+                            random_shift = random.choice(shifts)
+                            schedule[day] = random_shift
+                        print("stuck")
+                    if feasibility_check(mutated["schedule"], df, df_demand):
                         not_feasible = False
-                        individual["schedule"] = mutated["schedule"]
+                        individual["schedule"] = copy.deepcopy(mutated["schedule"])
     return population
 
-def crossover(population, size, df, df_demand, type_population):
+def point_crossover(population, size, df, df_demand, type_population):
+
+    """Creating a new population type data structure "children" and filling it with the offspring created 
+    by selecting parents through tournement selection of the current population and randomly selecting a crossover start/end point to replace parent1[start:end] with parent2[start:end] 
+    maintaing worker availability feasibility while also allowing for alot of possible childs. A feasibility check is performed afterwards to ensure
+    it meets the previous hours and group demand constraints"""
 
     days = len(population[0]["schedule"][0])
     workers = len(population[0]["schedule"])
-    #hold children individuals
     children = np.zeros(len(population), dtype=type_population)
-    counter = 0
-    index = 0
-    while index < len(children)-1:
+    attempts = 500
+    index = 0 
+
+    #loop to ensure children is filled with right amount of childs
+    while index < len(children):
+            #selecting via tournement selection with a tournement size
             parent_one = selection(population, size)
             parent_two = selection(population, size)
-            while id(parent_one) == id(parent_two):
+            #loop to ensure parent1 doesnt equal parent2 , i ran into problems where initial populations werent diverse so decieded to base it on
+            #fitness instead of id
+            while np.array_equal(parent_one["fitness"], parent_two["fitness"]):
                 parent_two = selection(population, size)
 
-            child_one = parent_one.copy()
-            child_two = parent_two.copy()
-            
-            for w in range(workers):
-                crossover_start = np.random.randint(0, days - 2)
-                crossover_end = np.random.randint(crossover_start + 1, days)
-                child_one["schedule"][w][crossover_start:crossover_end] = parent_two["schedule"][w][crossover_start:crossover_end] 
-                child_two["schedule"][w][crossover_start:crossover_end] = parent_one["schedule"][w][crossover_start:crossover_end]
-                
+            #creating a start and end point for crossover 
+            #start being workers -2 allows there always to be a valid start and end 
+            crossover_start = np.random.randint(0, workers - 2)
+            #end point will always be above the start to ensure it valid
+            crossover_end = np.random.randint(crossover_start + 1, workers)
 
-            #check feasibility seperately as 1 child may pass but the other might not 
-            if feasibility_check(child_one, df, df_demand) and index < len(children) :
-                children[index]["schedule"] = child_one["schedule"]
-                #increment index for the next child
+            #creating copies of the parents so the orignals wont change. i ran into memory leak problems using deepcopy and found this to work instead
+            child_one = np.copy(parent_one["schedule"])
+            child_two = np.copy(parent_two["schedule"])
+
+            #performing crossover 
+            child_one[crossover_start:crossover_end]= parent_two["schedule"][crossover_start:crossover_end]
+            child_two[crossover_start:crossover_end] = parent_one["schedule"][crossover_start:crossover_end]
+            #checking feasibility, returns a boolean value
+            child_one_feasible = feasibility_check(child_one, df, df_demand)
+            child_two_feasible = feasibility_check(child_two, df, df_demand)
+
+            #check if both children are valid seperately as one may be valid the other may not be 
+            if child_one_feasible and index < len(children):
+                #if it is valid increment index and add the schedule to the children 
+                children[index]["schedule"] = child_one
                 index += 1
-            if feasibility_check(child_two, df, df_demand) and index < len(children):
-                children[index]["schedule"] = child_two["schedule"]
-                #increment index for the next child
+            if child_two_feasible and index < len(children):
+                #if it is valid increment index and add the schedule to the children 
+                children[index]["schedule"] = child_two
                 index += 1
+
+            #fail safe to break while loop incase cant find len(children) amount of feasible solutions
             else:
-                #increment current number of attempts 
-                counter +=1
-    return children
+                attempts -= 1
+            if attempts == 0:
+                break
+    return children 
 
 
 def feasibility_check(child, df, df_demand):
@@ -193,7 +216,7 @@ def feasibility_check(child, df, df_demand):
     max_hours = df["Max_Hours"].values
 
     #create array of total hours of each employe from both children
-    child_total_hours = np.sum(child["schedule"], axis=1)
+    child_total_hours = np.sum(child, axis=1)
     
     #check the totals against min and max
     #each element of the child feasbilties are True or false np.all is used to check if all of them satisfy true 
@@ -204,7 +227,7 @@ def feasibility_check(child, df, df_demand):
         hours_feasbility = True
 
     #demand check: 
-    days = len(child["schedule"][0])
+    days = len(child[0])
     groups = df["Group code"].nunique()
     group_mapping = {"a":0 , "b": 1 , "c":2, "d":3} 
 
@@ -214,9 +237,9 @@ def feasibility_check(child, df, df_demand):
     demand_needed_matrix = df_demand[["Group_a", "Group_b", "Group_c", "Group_d"]].to_numpy()
 
     #uses same logic as the total_skill function but adjusted without skill calculation
-    for worker in range(len(child["schedule"])):
+    for worker in range(len(child)):
         worker_group = df.loc[worker, "Group code"]
-        for index, hours in enumerate(child["schedule"][worker]):
+        for index, hours in enumerate(child[worker]):
             if hours != 0:
                 demand_current_matrix[index, group_mapping[worker_group]] += 1
     #each element of the group feasbilties are True or false np.all is used to check if all of them satisfy true 
@@ -231,7 +254,9 @@ def feasibility_check(child, df, df_demand):
 #Tournement Selection
 def selection(population, size): 
 
-    #selction to choose 1 parent each time its called
+    """selction to choose 1 parent each time its called by performing tournement selection on a "size" amount of individuals
+    the individuals will compete with eachother and the highest front will win and the crowding distance will be the tie breaker to determine the
+    tournement winner (parent)"""
         
     #random choice between all the indces of population, and the size being the tournement size
     bracket = np.random.choice(len(population), size=size)
@@ -245,6 +270,7 @@ def selection(population, size):
 
 def calculate_fitness(individual, df):
 
+
     days = len(individual["schedule"][0])
     groups = df["Group code"].nunique()
 
@@ -257,10 +283,12 @@ def calculate_fitness(individual, df):
     skills_goal_value = df["Special Skill"].sum() #give the total number of skilled individuals overall 
     skills_goal_matrix = np.full((days, groups), skills_goal_value) #7 days and 4 groups.
     
-    current_skill = total_skill(individual, df, groups, days)
-    o2 = np.sum(skills_goal_matrix) - np.sum(current_skill)
+    group_mapping = {'a': 0, 'b': 1, 'c': 2, 'd': 3}
+    group_np = df["Group code"].map(group_mapping).values
+    skill_np = df['Special Skill'].values
     
-    #fitness of ???  (can add additional objectives if needed)
+    current_skill = total_skill(individual, group_np, skill_np, groups, days)
+    o2 = np.sum(skills_goal_matrix) - np.sum(current_skill)
     
     return [o1,o2]
 
@@ -342,6 +370,7 @@ def create_population(population_size, df_num_workers, workers, shift_hours, pop
         population[individual]["fitness"] = calculate_fitness(population[individual], df_num_workers)
     return population
 
+@jit(nopython=True)
 def non_dominated_sorting(population):
 
     #loop through population twice tobe able to compare each individual with eachother 
@@ -358,8 +387,8 @@ def non_dominated_sorting(population):
                     dominates_list.append(j)
                     #increment nexts "dominated by" count as its been dominated by current
                     next["domination_count"] += 1
-        population[i]["dominates"] = np.array(dominates_list)
-
+        population[i]["dominates"][:len(dominates_list)] = dominates_list
+        population[i]["dominates"][len(dominates_list):] = -1
     #using np.where to find where each of the first fronts are by them having a dominated by count of 0
     current_front_indexes = np.where(population["domination_count"] == 0)[0]
     #increments after each iteration 
@@ -381,9 +410,11 @@ def non_dominated_sorting(population):
         
     return population
 
+@jit(nopython=True)
 def dominates(current, next):
    return np.all(current <= next) and np.any(current < next)
 
+@jit(nopython=True)
 def crowding_distance(population):
 
     objective_length = len(population[0]["fitness"])
@@ -404,39 +435,59 @@ def crowding_distance(population):
 
         for i in range(len(population)):
             #check if current isnt equal to infite alread before calcuating. if it is then continue to next iteration
-            if population[sorted_by_fitness[i]]["crowding_distance"] == float("inf"):
+            if population[sorted_by_fitness[i]]["crowding_distance"] == np.inf:
                 continue
             population[sorted_by_fitness[i]]["crowding_distance"] = population[sorted_by_fitness[i]]["crowding_distance"] + (population[sorted_by_fitness[i+1]]["fitness"][o] - population[sorted_by_fitness[i-1]]["fitness"][o]) \
                  / (population[sorted_by_fitness[-1]]["fitness"][o] - population[sorted_by_fitness[0]]["fitness"][o])
    
-def total_skill(individual, df, groups, days):
+@jit(nopython=True)
+def total_skill(individual, group_np, skill_np, groups, days):
     #loop to check if employee is working on day and if they are then what is there group and skill
 
     #using a numpy matrix as to run faster and can further make code efficent by applying vectorisation if needed 
     skill_count = np.zeros((days, groups)) # 7 representing the days and 4 representing the number of the groups this can be hardcoded as this wont change
-    #used to map each group to a column in the skill count matrix 
-    group_mapping = {"a":0 , "b": 1 , "c":2, "d":3} 
         
     # calcualte deviation from skill goal to skilled workers to currently assigned skilled workers per days
     for worker in range(len(individual["schedule"])):
-        
-        worker_group = df.loc[worker, "Group code"]
-        worker_skill = df.loc[worker, "Special Skill"]
+        worker_group = group_np[worker] #group code is the 2nd column in df
+        worker_skill = skill_np[worker] #skill is the 3rd column in df 
         
         #for each day of the schedule for the employee check if they have a shift (hours !=0 )and they have a skill before incrementing the index
         for index, hours in enumerate(individual["schedule"][worker]):
             if hours != 0 and worker_skill == 1:
-                skill_count[index, group_mapping[worker_group]] += 1
+                skill_count[index, worker_group] += 1
             
     return skill_count
+
+def visualise_fronts(population):
+
+    # Extract fitness values for all individuals
+    fitness_values = np.array([individual["fitness"] for individual in population])
+    # Extract front numbers
+    fronts = np.array([individual["front"] for individual in population])
+
+    unique_fronts = np.unique(fronts)
+    plt.figure(figsize=(10, 8))
+
+    # Plot each front with a different color/marker
+    for front in unique_fronts:
+        indices = np.where(fronts == front)
+        plt.scatter(fitness_values[indices, 0], fitness_values[indices, 1], label=f'Front {front}')
+
+    plt.title('Pareto Fronts')
+    plt.xlabel('Objective 1')
+    plt.ylabel('Objective 2')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
 def group_demand(df_demand):
 
     #demand of each ggroup put into a list format 
-    group_a = df_demand["Group_a"].tolist()
-    group_b = df_demand["Group_b"].tolist()
-    group_c = df_demand["Group_c"].tolist()
-    group_d = df_demand["Group_d"].tolist()
+    group_a = df_demand["Group_a"].values
+    group_b = df_demand["Group_b"].values
+    group_c = df_demand["Group_c"].values
+    group_d = df_demand["Group_d"].values
     #dictionary is used as the values are easier to read from as the values in the employee df are the key values of the dictionary
     return {"a" : group_a, "b" : group_b, "c": group_c, "d": group_d}
 
@@ -444,3 +495,22 @@ if __name__ == "__main__":
     main()
     
 
+
+        
+"""non_dominated_sorting(mutated)
+        crowding_distance(mutated)
+        fronts = mutated["front"]
+        distances = mutated["crowding_distance"]
+
+        sorted_pop = mutated[[np.lexsort((-distances, fronts))]]
+        print("Generation", i+1)
+    
+        #reset population and use current schedules for the next population
+        population = np.zeros(len(mutated), dtype=type_population)
+        population["schedule"] = np.copy(mutated["schedule"])
+
+        for individual in range(len(population)):
+            population[individual]["fitness"] = calculate_fitness(population[individual], df_num_workers)
+        non_dominated_sorting(population)
+        crowding_distance(population)
+       # visualise_fronts(population) """
