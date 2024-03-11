@@ -8,28 +8,23 @@ import matplotlib.pyplot as plt
 import copy
 
 """
-constraints: using ORtools
+constraints: (using ORtools)
 -maxium shifts per employee a day <= 1
 -every employee meets min and max hours
 -schedule meets employees availability
 -schedule meets group demand per day
 
-Optimise: using NSGA-2
+Optimise: (using NSGA-2)
 -minimise hours to potentially their min
--maximise skilled individuals in per day
--???
+-maximise skilled individuals on shift per day
 
-steps left: 
+Final Steps:
+more numba + vectorisation on the mutation functions
+learning rate function 
+break local optima function 
 
-important : 
-
--mutation rework (shift length + day swap)
-
-not as important : 
- 
--learning rate
--(optional) - meta models to search for approx fitness values to speed up, 
-
+References: 
+https://www.youtube.com/watch?v=SL-u_7hIqjA - explanation of the main steps i used for my nsga-2 and technique of elitism by combining start and end population and sorting for best half
 """
 
 def main():
@@ -43,9 +38,9 @@ def main():
 
     #adjustable parameters
     workers = 1000
-    population_size = 100
+    population_size = 20
     generation_size = 100
-    mutation_rate = 0.03
+    mutation_rate = 0.05
     tournement_size = 3
     elite_size = 3
 
@@ -73,7 +68,8 @@ def main():
     #calcualte nsga-2 properties:
     non_dominated_sorting(initial_population)
     crowding_distance(initial_population)
-    
+    visualise_fronts(initial_population)
+
     final_population = generations(generation_size, initial_population, tournement_size, mutation_rate, elite_size, type_population, df_avail, df_demand, shifts, df_num_workers)
     visualise_fronts(final_population)
 
@@ -85,8 +81,8 @@ def generations(generation_size, population, tournement_size, mutation_rate, eli
    
     for i in range(generation_size):
 
-        mutated = point_crossover(population, tournement_size, df, df_demand, type_population) #parents are chosen in crossover
-        #mutated = mutation(children, mutation_rate, shifts, df, df_demand)
+        children = crossover(population, tournement_size, df, df_demand, type_population) #parents are chosen in crossover
+        mutated = mutation(children, mutation_rate, shifts, df, df_demand, type_population)
 
         #calculate new fitness for the mutated population while fitness the other attributes 
         for individual in range(len(mutated)):
@@ -119,36 +115,105 @@ def generations(generation_size, population, tournement_size, mutation_rate, eli
         print("Generation", i+1)
     return population
 
-def break_local_optima(population):
-    pass
-    """if top 5 individuals are identical in fitness scores then increase mutation size and reduce tournement size"""
+def calculate_learning_rate(fitnesses):
+    """calculate the rate of improvement over all generations, this will be used to determine if break_local_optima should be ran or not"""
     
 
-def mutation(population, mutation_rate, shifts, df, df_demand):
+def break_local_optima(population):
 
-    """As crossover changes schedules through days and hours worked on swapped days. I think its important to also include diversity
-    in the different types of shifts. by introducing shift length mutation the population will be introduced to a varied amount of shift lengths
-    from the inital creation"""
+    """if learning rate is not above threshold then , reduce tournement size , increase mutation. and create 3 new feasible solutions
+    using CPsolver. This should reduce selection pressure and promote diversity by allowing existing indiviudals to share genes with newly
+    introduced ones"""
 
-    for individual in population:
+    pass
+   
+    
+
+def mutation(population, mutation_rate, shifts, df, df_demand, type_population):
+    
+    """for mutation i think its important to randomise shift lengths to introduce more variety and also swap days that they have optionally off
+    but are still avaialble to work. this would allow more diversity within the population to breed and potentially creating future better offspring"""
+
+    days = len(population[0]["schedule"][0])
+    workers = len(population[0]["schedule"])
+    mutated = np.zeros(len(population), dtype=type_population)
+    attempts = 100
+    index = 0 
+    for individual in range(len(population)):
+        #if a number less than mutation rate is picked then mutate the chromosome
         if random.random() < mutation_rate:
-            not_feasible = True
-            mutated = copy.deepcopy(individual)
-            for w, schedule in enumerate(mutated["schedule"]):
-                while not_feasible:
-                    days_to_mutate = np.count_nonzero(mutated["schedule"][w]) 
-                    mutate_days = random.sample(range(len(schedule)), days_to_mutate)
-                    for day in mutate_days:
-                        if schedule[day] != 0:  
-                            random_shift = random.choice(shifts)
-                            schedule[day] = random_shift
-                        print("stuck")
-                    if feasibility_check(mutated["schedule"], df, df_demand):
-                        not_feasible = False
-                        individual["schedule"] = copy.deepcopy(mutated["schedule"])
-    return population
+            not_feasibility = True
+            while not_feasibility:
+                mutation_start = np.random.randint(0, workers - 2)
+                mutation_end = np.random.randint(mutation_start + 1, workers)
+                    
+                chromosome = np.copy(population[individual]["schedule"])
+                section = np.copy(chromosome[mutation_start:mutation_end])
+                shift_swap_mutation(section, df)
+                shift_length_mutation(section, shifts)
+               # print("tried")
+                chromosome[mutation_start:mutation_end] = section
+                chromosome_feasibility = feasibility_check(chromosome, df, df_demand)
+                if chromosome_feasibility and index < len(mutated):
+                    #if it is valid increment index and add the schedule to the children 
+                    mutated[index]["schedule"] = chromosome
+                    not_feasibility = False
+                    print("passed")
+                    index +=1
+                else:
+                    attempts -= 1
+                    if attempts == 0:
+                        mutated[index]["schedule"] = np.copy(population[individual]["schedule"])
+                        break
+        else:
+            mutated[index]["schedule"] = np.copy(population[individual]["schedule"])
+            index +=1
+        
+    return mutated
 
-def point_crossover(population, size, df, df_demand, type_population):
+
+@jit(nopython=True)
+def shift_swap_mutation(section, df):
+    """Mutation to find days employee is available but it isnt working but is available and swap that day with a day they are already working
+    this will allow the algorithm to explore different combinations of skill workers per day"""
+
+    #loop through each workers schedule 
+    for w in range(len(section)):
+        #days the worker can work but has been given as off
+        free_days = np.where(section[w] == 0) & (df.loc[w, "Sunday":"Saturday"].values ==1 )[0]
+        #if there are any days then that can be swapped then..
+        if len(free_days) > 0:
+            #choose one of the free days
+            free_day_to_swap = random.choice(free_days[0])
+            #all days in schedule employee is currently working
+            working_days = np.where(section[w] != 0)[0]
+            if len(working_days) > 0: 
+                #random choice of working days to swap
+                work_day_to_swap = random.choice(working_days)
+                #swap elements in the schedule 
+                section[w, free_day_to_swap], section[w, work_day_to_swap] = section[w, work_day_to_swap], section[w, free_day_to_swap]
+                
+    return section
+
+@jit(nopython=True)
+def shift_length_mutation(section, shifts):
+    """from the "shifts" array select a random shift from it to change n amount for each n days of each schedule"""
+   
+    for w in range(len(section)):
+        #list of days the employee is working
+        working_days = np.where(section[w] != 0)[0]
+        if len(working_days) > 0:
+            #randomly chose number of days to mutate with a range up to how many they are working 
+            num_days = np.random.randint(1, len(working_days))
+
+            mutate_days = working_days[np.random.randint(0, len(working_days), size=num_days)]
+            for day in mutate_days:
+                section[w][day] = shifts[np.random.randint(0, len(shifts))]
+
+    return section
+
+
+def crossover(population, size, df, df_demand, type_population):
 
     """Creating a new population type data structure "children" and filling it with the offspring created 
     by selecting parents through tournement selection of the current population and randomly selecting a crossover start/end point to replace parent1[start:end] with parent2[start:end] 
@@ -158,7 +223,7 @@ def point_crossover(population, size, df, df_demand, type_population):
     days = len(population[0]["schedule"][0])
     workers = len(population[0]["schedule"])
     children = np.zeros(len(population), dtype=type_population)
-    attempts = 500
+    attempts = 100
     index = 0 
 
     #loop to ensure children is filled with right amount of childs
@@ -201,12 +266,14 @@ def point_crossover(population, size, df, df_demand, type_population):
             #fail safe to break while loop incase cant find len(children) amount of feasible solutions
             else:
                 attempts -= 1
-            if attempts == 0:
-                break
+                if attempts == 0:
+                    break
     return children 
 
 
 def feasibility_check(child, df, df_demand):
+
+    """to check feasibility of an individual against constraints of min<= x <=max and also agaisnt the group demand for each day"""
 
     #check hours and group feasibility
     hours_feasbility = False
@@ -270,7 +337,6 @@ def selection(population, size):
 
 def calculate_fitness(individual, df):
 
-
     days = len(individual["schedule"][0])
     groups = df["Group code"].nunique()
 
@@ -299,7 +365,6 @@ def create_population(population_size, df_num_workers, workers, shift_hours, pop
         model = cp_model.CpModel()
         solver = cp_model.CpSolver()
         solver.parameters.random_seed = random.randint(1, 100)
-
         length_shifts = len(shift_hours) #used to iterate through shift_hours without calling len 
         days = 7  # 7 days in a week which can be hardcoded as this won't change.
 
@@ -309,13 +374,11 @@ def create_population(population_size, df_num_workers, workers, shift_hours, pop
                 for s in range(length_shifts):
                     #creates a boolean dictionary for each combination of employees as a unique key
                     shifts[(w, d, s)] = model.NewBoolVar(f"shift_w{w}_d{d}_s{s}")
-
         #Number of shifts has to be max 1:
         for w in range(workers):
             for d in range(days):
                 #add constraint to model
                 model.Add(sum(shifts[(w, d ,s)] for s in range(length_shifts)) <= 1)
-
         # Don't schedule if they aren't available:
         for w in range(workers):
             for d in range(days):
@@ -325,7 +388,6 @@ def create_population(population_size, df_num_workers, workers, shift_hours, pop
                     for s in range(1, length_shifts):
                         #add constraint that the solution is infeasible when employee cant work on that day 
                         model.Add(shifts[(w, d, s)] == 0)
-
         #Hours constraint 
         for w in range(workers):
             total_hours = 0
@@ -336,7 +398,6 @@ def create_population(population_size, df_num_workers, workers, shift_hours, pop
             #add constraint to meet the min and max hours  
             model.Add(total_hours >= df_num_workers.loc[w, "Min_Hours"])
             model.Add(total_hours <= df_num_workers.loc[w, "Max_Hours"])
-
         #group constraint 
         for d in range(days):
             for group, demand in demands.items():  #loops through each group in the demands dictionary 
@@ -474,11 +535,10 @@ def visualise_fronts(population):
         indices = np.where(fronts == front)
         plt.scatter(fitness_values[indices, 0], fitness_values[indices, 1], label=f'Front {front}')
 
-    plt.title('Pareto Fronts')
-    plt.xlabel('Objective 1')
-    plt.ylabel('Objective 2')
+    plt.title('Fronts')
+    plt.xlabel('Objective 1: Minimising hours')
+    plt.ylabel('Objective 2: Maximising Skill')
     plt.legend()
-    plt.grid(True)
     plt.show()
 
 def group_demand(df_demand):
@@ -495,22 +555,3 @@ if __name__ == "__main__":
     main()
     
 
-
-        
-"""non_dominated_sorting(mutated)
-        crowding_distance(mutated)
-        fronts = mutated["front"]
-        distances = mutated["crowding_distance"]
-
-        sorted_pop = mutated[[np.lexsort((-distances, fronts))]]
-        print("Generation", i+1)
-    
-        #reset population and use current schedules for the next population
-        population = np.zeros(len(mutated), dtype=type_population)
-        population["schedule"] = np.copy(mutated["schedule"])
-
-        for individual in range(len(population)):
-            population[individual]["fitness"] = calculate_fitness(population[individual], df_num_workers)
-        non_dominated_sorting(population)
-        crowding_distance(population)
-       # visualise_fronts(population) """
