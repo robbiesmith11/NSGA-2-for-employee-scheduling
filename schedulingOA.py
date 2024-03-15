@@ -25,14 +25,14 @@ def GUI():
         
         -run time slowed down by mutation function (numba, vectorisation)
         -paraleisation of create initial population
-
+        -references
+        
     References:
         - https://www.youtube.com/watch?v=SL-u_7hIqjA - logic of the main steps i used for my nsga-2 and technique of elitism by combining start and end population and sorting for best half
         - https://ai.stackexchange.com/questions/23637/what-are-most-commons-methods-to-measure-improvement-rate-in-a-meta-heuristic - learning rate functions and termination
         - https://stackoverflow.com/questions/30062429/how-to-get-every-first-element-in-2-dimensional-list - used in visualise fronts function
-        - https://youtu.be/dPdB7zyGttg?si=K34MGvCvLun_l9iq - stop streamlit annoyingly rerunning every time user selects new value from selectbox
+        - https://youtu.be/dPdB7zyGttg?si=K34MGvCvLun_l9iq - stop streamlit annoyingly rerunning every time user selects new value from selectbox by using session state
     """
-
     # should stay at 1000 as we only have the demand for that amount (future improvement ML prediction for needed demand)
     workers = 1000
     # can customise to add additional hour lengths of shifts
@@ -91,7 +91,6 @@ def main(
     break_local_optima_threshold,
     shifts,
 ):
-    done = False
     # import datasets
     df_avail = pd.read_csv(r"C:\Users\smith\Downloads\New_dataset.csv")
     df_demand = pd.read_csv(r"C:\Users\smith\Downloads\Scaled_Demand.csv")
@@ -253,7 +252,6 @@ def calculate_improvement_rate(fitnesses, population):
     # calculate the rate of improvement from last 2 generations if it is lower than the threshold then
     # terminate algorithm so can not waste resources continuing the run time when improvement is marginal
 
-    terminate = False
     # average fitness of population
     current = np.mean([individual["fitness"] for individual in population])
     # add fitness to list of fitnesses to track improvement(python placeholder, find way to use numpy)
@@ -718,8 +716,9 @@ def visualise_fronts(population):
     fitnesses = []
     fronts = []
     for individual in population:
-        fitnesses.append(individual["fitness"])
-        fronts.append(individual["front"])
+        if individual["front"] == 1:
+            fitnesses.append(individual["fitness"])
+            fronts.append(individual["front"])
     #using reference from stack overflow to get the x and y values so they can be plotted
     x = [i[0] for i in fitnesses]
     y = [i[1] for i in fitnesses]
@@ -727,9 +726,9 @@ def visualise_fronts(population):
     #plot fronts
     plt.figure(figsize=(10, 6))
     plt.scatter(x, y, c=fronts)
-    plt.title("Pareto Fronts")
-    plt.xlabel("Objective 1: Minimize Hours (lower = better)")
-    plt.ylabel("Objective 2: Maximize Skilled Individuals")
+    plt.title("Pareto Fronts (lower = better)")
+    plt.xlabel("Objective 1: Minimize Hours")
+    plt.ylabel("Objective 2: Maximize Skilled Individuals" )
     plt.grid(True)
     st.pyplot(plt)
 
